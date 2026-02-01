@@ -6,7 +6,7 @@
 
 ## Overview
 
-LudigoOS-OpenClaw is a production-ready deterministic multi-agent operating system designed for verifiable AI intelligence. Built on the axiom "Logic as Play," it transforms rigid computation into joyful, creative exploration through game-like rules and emergent behaviors. The system ensures bit-identical reproducibility across platforms using Q16.16 fixed-point arithmetic, seeded RNGs, and the TRUE-PATH cryptographic verification protocol.
+LudigoOS-OpenClaw is a deterministic multi-agent operating system designed for verifiable AI intelligence. Built on the axiom "Logic as Play," the system ensures bit-identical reproducibility across platforms using Q16.16 fixed-point arithmetic, seeded RNGs, and the TRUE-PATH cryptographic verification protocol.
 
 Key principles:
 - **Determinism**: Perfect reproducibility for AI agents, eliminating floating-point variance.
