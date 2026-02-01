@@ -1,0 +1,486 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+LudicOS-OpenClaw + Local LLM Integration Examples
+================================================================================
+
+Practical examples showing how to integrate local LLMs (via Ollama) with the
+deterministic kernel while maintaining reproducibility.
+
+Requirements:
+    pip install numpy requests
+
+Prerequisites:
+    1. Install Ollama: curl -fsSL https://ollama.com/install.sh | sh
+    2. Download model: ollama pull llama2
+    3. Ensure Ollama is running: ollama serve
+
+================================================================================
+"""
+
+import json
+import hashlib
+import requests
+import re
+from typing import Dict, List, Tuple, Optional
+
+# Import the kernel
+from ludicoS_kernel_production import AgentKernel, Q1616, qarray
+
+
+# =============================================================================
+# OLLAMA CLIENT
+# =============================================================================
+
+class OllamaClient:
+    """Simple client for local Ollama LLM."""
+    
+    def __init__(self, model: str = "llama2", base_url: str = "http://localhost:11434"):
+        """
+        Initialize Ollama client.
+        
+        Args:
+            model: Model name (llama2, mistral, phi, etc.)
+            base_url: Ollama API endpoint
+        """
+        self.model = model
+        self.base_url = base_url
+        self.api_url = f"{base_url}/api/generate"
+    
+    def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 512) -> str:
+        """
+        Generate text from prompt.
+        
+        Args:
+            prompt: Input text
+            temperature: Sampling temperature (0 = deterministic, 1 = creative)
+            max_tokens: Maximum response length
+        
+        Returns:
+            Generated text
+        """
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            }
+        }
+        
+        try:
+            response = requests.post(self.api_url, json=payload, timeout=60)
+            response.raise_for_status()
+            result = response.json()
+            return result.get("response", "").strip()
+        except requests.exceptions.ConnectionError:
+            raise RuntimeError(
+                "Cannot connect to Ollama. Is it running? Try: ollama serve"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Ollama error: {e}")
+    
+    def is_available(self) -> bool:
+        """Check if Ollama is running."""
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+
+
+# =============================================================================
+# PATTERN 1: LLM-GUIDED AGENT DECISIONS
+# =============================================================================
+
+def example_llm_guided_decisions():
+    """
+    Example: Use LLM to make high-level decisions for agents.
+    
+    The LLM generates suggestions, which are converted to deterministic
+    Q16.16 parameters that the kernel executes.
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 1: LLM-GUIDED AGENT DECISIONS")
+    print("="*70)
+    
+    # Initialize LLM
+    llm = OllamaClient(model="llama2")
+    
+    if not llm.is_available():
+        print("❌ Ollama not available. Please start it with: ollama serve")
+        return
+    
+    print("✓ Ollama connected")
+    
+    # Initialize kernel
+    kernel = AgentKernel(n_nodes=6, dim=4, seed=4242, format='Q1616')
+    print(f"✓ Kernel initialized (hash: {kernel.hash_state()})")
+    
+    # Run 5 steps with LLM guidance
+    for step in range(5):
+        print(f"\n--- Step {step + 1} ---")
+        
+        # Get current state of Agent 0
+        agent_0_state = [x.to_float() for x in kernel.nodes[0].x_self]
+        
+        # Ask LLM for high-level strategy
+        prompt = f"""You are controlling an agent in a multi-agent system.
+Current state: {agent_0_state}
+Goal: Minimize state magnitude while exploring.
+
+Suggest a strategy in one sentence, then provide numerical parameters:
+- exploration_factor: 0.0 to 1.0 (higher = more exploration)
+- target_direction: -1.0 to 1.0 (direction to move)
+
+Format: exploration_factor=X, target_direction=Y"""
+        
+        llm_response = llm.generate(prompt, temperature=0.7, max_tokens=150)
+        print(f"LLM response: {llm_response[:200]}...")
+        
+        # Parse LLM output to extract parameters
+        exploration = 0.5  # defaults
+        direction = 0.0
+        
+        # Simple regex parsing
+        exp_match = re.search(r'exploration_factor\s*=\s*([\d.]+)', llm_response)
+        dir_match = re.search(r'target_direction\s*=\s*(-?[\d.]+)', llm_response)
+        
+        if exp_match:
+            exploration = float(exp_match.group(1))
+        if dir_match:
+            direction = float(dir_match.group(1))
+        
+        print(f"Parsed: exploration={exploration:.3f}, direction={direction:.3f}")
+        
+        # Convert to deterministic Q16.16 and use as MCMC parameters
+        # This maintains determinism: LLM suggests, kernel executes deterministically
+        tau = 0.1 + exploration * 0.3  # Higher exploration = higher temperature
+        beta = 0.05 + abs(direction) * 0.05  # Larger direction = larger steps
+        
+        # Execute kernel step (deterministic!)
+        kernel.step(K_mcmc=8, tau=tau, beta=beta, verbose=False)
+        
+        print(f"Kernel hash: {kernel.hash_state()}")
+    
+    print(f"\n✓ Completed 5 LLM-guided steps")
+    print(f"✓ Final hash: {kernel.hash_state()}")
+    print("\nNote: Due to LLM non-determinism, hash sequence varies.")
+    print("But each kernel.step() is internally deterministic given its parameters!")
+
+
+# =============================================================================
+# PATTERN 2: LLM AS REWARD FUNCTION DESIGNER
+# =============================================================================
+
+def example_llm_reward_designer():
+    """
+    Example: LLM designs the reward function based on user goal.
+    
+    User describes objective in natural language, LLM generates Python code
+    for reward function, kernel optimizes using that reward.
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 2: LLM AS REWARD FUNCTION DESIGNER")
+    print("="*70)
+    
+    llm = OllamaClient(model="llama2")
+    
+    if not llm.is_available():
+        print("❌ Ollama not available. Please start it with: ollama serve")
+        return
+    
+    print("✓ Ollama connected")
+    
+    # User goal
+    user_goal = "I want agents to form a circle pattern around the origin"
+    print(f"\nUser goal: {user_goal}")
+    
+    # Ask LLM to design reward function
+    prompt = f"""Design a reward function for a multi-agent system.
+
+Goal: {user_goal}
+
+Each agent has a 4D state vector [x0, x1, x2, x3].
+Write Python code for a reward function that takes the state vector 'x' 
+(list of Q16.16 numbers) and returns a Q1616 reward (higher is better).
+
+Use: math.sqrt(), x[i].to_float(), and return Q1616(value)
+
+Provide ONLY the function code, no explanation:"""
+    
+    llm_code = llm.generate(prompt, temperature=0.3, max_tokens=300)
+    print(f"\nLLM-generated code:\n{llm_code}\n")
+    
+    # In production, you'd validate this code carefully!
+    # For demo, we'll use a safe fallback
+    print("⚠️  In production, validate LLM-generated code before exec!")
+    print("Using safe fallback reward function for this demo.\n")
+    
+    # Initialize kernel with custom reward
+    kernel = AgentKernel(n_nodes=6, dim=4, seed=4242, format='Q1616')
+    
+    # Define a safe reward function (encouraging circular pattern)
+    def circle_reward(agent_node, x):
+        """Reward agents for being at radius ~1.0 from origin."""
+        import math
+        floats = [xi.to_float() for xi in x]
+        # Use first 2 dimensions as x, y coordinates
+        radius = math.sqrt(floats[0]**2 + floats[1]**2)
+        # Reward being near radius 1.0
+        distance_from_target = abs(radius - 1.0)
+        return Q1616(-distance_from_target)
+    
+    # Inject custom reward into all agents
+    for node in kernel.nodes:
+        original_reward = node.reward_scalar
+        node.reward_scalar = lambda x, n=node: circle_reward(n, x)
+    
+    print("Running kernel with custom reward function...")
+    for t in range(10):
+        kernel.step(K_mcmc=12, tau=0.2, beta=0.08, verbose=False)
+    
+    print(f"\n✓ Optimized for 10 steps")
+    print(f"✓ Final hash: {kernel.hash_state()}\n")
+    
+    # Show agent positions (first 2 dimensions as x, y)
+    print("Agent positions (x, y from first 2 state dimensions):")
+    for i, node in enumerate(kernel.nodes):
+        x = node.x_self[0].to_float()
+        y = node.x_self[1].to_float()
+        radius = (x**2 + y**2)**0.5
+        print(f"  Agent {i}: ({x:6.3f}, {y:6.3f}) radius={radius:.3f}")
+
+
+# =============================================================================
+# PATTERN 3: LLM FOR STATE INTERPRETATION
+# =============================================================================
+
+def example_llm_state_interpreter():
+    """
+    Example: Run deterministic kernel, use LLM to interpret results.
+    
+    Kernel maintains perfect reproducibility, LLM provides human-readable
+    analysis and insights.
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 3: LLM FOR STATE INTERPRETATION")
+    print("="*70)
+    
+    llm = OllamaClient(model="llama2")
+    
+    if not llm.is_available():
+        print("❌ Ollama not available. Please start it with: ollama serve")
+        return
+    
+    print("✓ Ollama connected")
+    
+    # Run kernel deterministically
+    print("\nRunning deterministic kernel...")
+    kernel = AgentKernel(n_nodes=6, dim=4, seed=4242, format='Q1616')
+    initial_hash = kernel.hash_state()
+    
+    for t in range(10):
+        kernel.step(K_mcmc=12, tau=0.2, beta=0.08, verbose=False)
+    
+    final_hash = kernel.hash_state()
+    print(f"✓ Initial hash: {initial_hash}")
+    print(f"✓ Final hash: {final_hash}")
+    
+    # Collect state information
+    state_summary = []
+    for node in kernel.nodes:
+        state_vals = [x.to_float() for x in node.x_self]
+        magnitude = sum(v**2 for v in state_vals)**0.5
+        state_summary.append({
+            'id': node.id,
+            'state': state_vals,
+            'magnitude': magnitude
+        })
+    
+    # Ask LLM to interpret
+    prompt = f"""Analyze this multi-agent system state after 10 optimization steps:
+
+Agents:
+{json.dumps(state_summary, indent=2)}
+
+The system uses MCMC to minimize state magnitude while exploring.
+
+Provide a brief analysis:
+1. Which agents are most/least active?
+2. Are there any patterns in the state values?
+3. What might be happening in the system?
+
+Keep response under 150 words."""
+    
+    print("\nAsking LLM to interpret state...")
+    interpretation = llm.generate(prompt, temperature=0.5, max_tokens=200)
+    
+    print("\nLLM Interpretation:")
+    print("-" * 70)
+    print(interpretation)
+    print("-" * 70)
+    
+    print(f"\n✓ Analysis complete")
+    print("✓ Kernel state remains deterministic and verifiable")
+
+
+# =============================================================================
+# PATTERN 4: DETERMINISTIC SEEDING FROM LLM
+# =============================================================================
+
+def example_llm_deterministic_seeding():
+    """
+    Example: Use LLM output to generate deterministic seeds.
+    
+    This allows LLM creativity while maintaining kernel reproducibility.
+    Each unique LLM output → unique but reproducible kernel run.
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 4: DETERMINISTIC SEEDING FROM LLM")
+    print("="*70)
+    
+    llm = OllamaClient(model="llama2")
+    
+    if not llm.is_available():
+        print("❌ Ollama not available. Please start it with: ollama serve")
+        return
+    
+    print("✓ Ollama connected\n")
+    
+    # Different scenarios
+    scenarios = [
+        "cooperative swarm exploring a maze",
+        "competitive agents fighting for resources",
+        "hierarchical team solving a puzzle"
+    ]
+    
+    for scenario in scenarios:
+        print(f"\nScenario: {scenario}")
+        print("-" * 60)
+        
+        # LLM generates description
+        prompt = f"Describe in exactly 10 words how agents would behave in: {scenario}"
+        description = llm.generate(prompt, temperature=0.8, max_tokens=50)
+        print(f"LLM description: {description}")
+        
+        # Hash the LLM output to get deterministic seed
+        seed_hash = hashlib.sha256(description.encode()).hexdigest()
+        seed = int(seed_hash[:8], 16) % 100000  # Convert to reasonable seed
+        print(f"Generated seed: {seed}")
+        
+        # Initialize kernel with this seed
+        kernel = AgentKernel(n_nodes=6, dim=4, seed=seed, format='Q1616')
+        initial_hash = kernel.hash_state()
+        
+        # Run deterministically
+        for t in range(5):
+            kernel.step(K_mcmc=8, tau=0.15, beta=0.06, verbose=False)
+        
+        final_hash = kernel.hash_state()
+        print(f"Initial hash: {initial_hash}")
+        print(f"Final hash: {final_hash}")
+        
+        # Key insight: Running again with same LLM output gives same result!
+        kernel2 = AgentKernel(n_nodes=6, dim=4, seed=seed, format='Q1616')
+        for t in range(5):
+            kernel2.step(K_mcmc=8, tau=0.15, beta=0.06, verbose=False)
+        
+        assert kernel2.hash_state() == final_hash
+        print("✓ Reproducibility verified (same LLM output → same kernel result)")
+
+
+# =============================================================================
+# PATTERN 5: SIMPLE OLLAMA TEST
+# =============================================================================
+
+def test_ollama_connection():
+    """Test that Ollama is working correctly."""
+    print("\n" + "="*70)
+    print("TESTING OLLAMA CONNECTION")
+    print("="*70)
+    
+    llm = OllamaClient(model="llama2")
+    
+    print("\nChecking Ollama availability...")
+    if not llm.is_available():
+        print("❌ Ollama not available")
+        print("\nTo fix:")
+        print("1. Install Ollama: curl -fsSL https://ollama.com/install.sh | sh")
+        print("2. Download model: ollama pull llama2")
+        print("3. Start server: ollama serve")
+        return False
+    
+    print("✓ Ollama is running")
+    
+    print("\nTesting text generation...")
+    response = llm.generate("Say 'hello' in exactly 3 words", temperature=0.1, max_tokens=10)
+    print(f"LLM response: {response}")
+    
+    print("\n✓ Ollama test successful!")
+    return True
+
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+def main():
+    """Run all examples."""
+    print("\n" + "="*70)
+    print("LudicOS-OpenClaw + Local LLM Integration Examples")
+    print("="*70)
+    
+    # Test connection first
+    if not test_ollama_connection():
+        print("\n⚠️  Ollama not available. Examples require Ollama.")
+        print("See LLM_INTEGRATION_GUIDE.txt for setup instructions.")
+        return
+    
+    # Run examples
+    examples = [
+        ("LLM-Guided Decisions", example_llm_guided_decisions),
+        ("LLM Reward Designer", example_llm_reward_designer),
+        ("LLM State Interpreter", example_llm_state_interpreter),
+        ("Deterministic Seeding", example_llm_deterministic_seeding),
+    ]
+    
+    print("\n" + "="*70)
+    print("Available Examples:")
+    for i, (name, _) in enumerate(examples, 1):
+        print(f"  {i}. {name}")
+    print("="*70)
+    
+    choice = input("\nRun which example? (1-4, or 'all'): ").strip().lower()
+    
+    if choice == 'all':
+        for name, func in examples:
+            try:
+                func()
+            except Exception as e:
+                print(f"\n❌ Error in {name}: {e}")
+    elif choice in ['1', '2', '3', '4']:
+        idx = int(choice) - 1
+        name, func = examples[idx]
+        try:
+            func()
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+    else:
+        print("Invalid choice. Running test only.")
+    
+    print("\n" + "="*70)
+    print("✓ Examples complete!")
+    print("="*70)
+    print("\nKey Takeaways:")
+    print("• LLMs provide creativity and natural language understanding")
+    print("• Kernel provides deterministic, verifiable execution")
+    print("• Hash LLM outputs for reproducible seeds")
+    print("• Always convert LLM outputs → Q16.16 → kernel")
+    print("• This hybrid approach gives best of both worlds")
+    print("="*70 + "\n")
+
+
+if __name__ == "__main__":
+    main()
