@@ -170,14 +170,8 @@ Compares two kernels for bit-identical hashes.
 - Overflow: Saturation clamping prevents errors but limits range [-32768, 32767].
 - RNG: Seeded for determinism; not cryptographically secure.
 
-## Contributing
-
-Contributions welcome! Fork the repo, create a branch, and submit a PR. Focus on determinism—ensure all changes maintain bit-identical behavior.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
 
----
-
-🦞 The Lobster Way: Deterministic, Verifiable, Scalable.# Ludigo
