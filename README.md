@@ -200,7 +200,6 @@ These are *intentional tradeoffs* in favor of determinism.
 ---
 
 > **If it cannot be replayed, it cannot be trusted.**
-> **If it cannot be trusted, it cannot govern reality.**
 
 ---
 
