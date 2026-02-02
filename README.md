@@ -199,12 +199,6 @@ These are *intentional tradeoffs* in favor of determinism.
 
 ---
 
-## 10. The Newtonian Pivot
-
-AI is exiting its **Alchemical Era**.
-
-Ludigo marks the transition to a **Newtonian Era of Intelligence**—where computation obeys laws, executions are replayable, and trust is engineered, not assumed.
-
 > **If it cannot be replayed, it cannot be trusted.**
 > **If it cannot be trusted, it cannot govern reality.**
 
@@ -212,6 +206,5 @@ Ludigo marks the transition to a **Newtonian Era of Intelligence**—where compu
 
 ## License
 
-**MIT License** — see `LICENSE`.
-
+**MIT License** 
 
